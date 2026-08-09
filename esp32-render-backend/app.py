@@ -3,265 +3,226 @@ import json
 import sqlite3
 import base64
 import time
-import threading
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from zoneinfo import ZoneInfo
+
+
+from flask import Flask, render_template, request, jsonify
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 app = Flask(__name__)
-
-# Cấu hình đường dẫn tuyệt đối cho Render / Linux Host
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'uploads')
+DATA_DIR = os.environ.get('DATA_DIR', '.')
+UPLOAD_FOLDER = os.path.join(DATA_DIR, 'static/uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, 'database.db')
 
-DB_FILE = os.path.join(BASE_DIR, 'database.db')
-
-# Bộ nhớ tạm lưu trữ Chunk ảnh trong RAM & Khóa Thread an toàn
+# Bộ đệm lưu tạm các mảnh ảnh trong RAM trước khi ghép
 chunks_storage = {}
-storage_lock = threading.Lock()
-
-def get_db_connection():
-    # Khởi tạo kết nối SQLite với timeout và chế độ WAL chống khóa DB
-    conn = sqlite3.connect(DB_FILE, timeout=30)
-    conn.execute('PRAGMA journal_mode=WAL;')
-    return conn
 
 def init_db():
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS sensor_data (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT, temp REAL, hum REAL, vib REAL, battery REAL, img_path TEXT)''')
-        
-        # Kiểm tra và thêm cột battery nếu CSDL chưa có
-        c.execute("PRAGMA table_info(sensor_data)")
-        columns = [col[1] for col in c.fetchall()]
-        if 'battery' not in columns:
-            c.execute("ALTER TABLE sensor_data ADD COLUMN battery REAL DEFAULT 0.0")
-
-        c.execute('''CREATE TABLE IF NOT EXISTS thresholds (
-                        id INTEGER PRIMARY KEY, temp_max REAL, hum_max REAL, vib_max REAL)''')
-        c.execute('INSERT OR IGNORE INTO thresholds (id, temp_max, hum_max, vib_max) VALUES (1, 35.0, 80.0, 5.0)')
-        conn.commit()
-    except Exception as e:
-        print(f"[INIT DB ERROR] {e}", flush=True)
-    finally:
-        if conn:
-            conn.close()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS sensor_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT, temp REAL, hum REAL, vib REAL, img_path TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS thresholds (
+                    id INTEGER PRIMARY KEY, temp_max REAL, hum_max REAL, vib_max REAL)''')
+    c.execute('INSERT OR IGNORE INTO thresholds (id, temp_max, hum_max, vib_max) VALUES (1, 35.0, 80.0, 5.0)')
+    conn.commit()
+    conn.close()
 
 init_db()
 
 def clean_expired_chunks():
-    # Tự động dọn dẹp các phiên upload treo quá 10 phút trong RAM
+    """Tự động dọn dẹp các phiên truyền ảnh dở dang nằm trong RAM quá 10 phút"""
     now = time.time()
-    with storage_lock:
-        expired_ids = [uid for uid, info in chunks_storage.items() if now - info.get('created_at', now) > 600]
-        for uid in expired_ids:
-            if uid in chunks_storage:
-                del chunks_storage[uid]
-                print(f"[SERVER RAM] Đã xóa phiên hết hạn: {uid}", flush=True)
+    expired_ids = []
+    # Dùng list() để tránh RuntimeError khi sửa đổi dictionary lúc đang lặp
+    for uid, info in list(chunks_storage.items()):
+        if now - info.get('created_at', now) > 600: # 10 phút
+            expired_ids.append(uid)
+    for uid in expired_ids:
+        if uid in chunks_storage:
+            del chunks_storage[uid]
+            print(f"[SERVER RAM] Đã xóa phiên hết hạn/treo: {uid}")
 
 def safe_base64_decode(b64_str):
-    # Xử lý và giải mã Base64 an toàn tự sửa lỗi padding và xuống dòng
+    """Xử lý và giải mã Base64 an toàn, tự sửa lỗi rụng ký tự/padding"""
+    # 1. Làm sạch khoảng trắng, xuống dòng, ký tự rác
     clean_b64 = b64_str.strip().replace(" ", "+").replace("\r", "").replace("\n", "")
+    
+    # 2. Xử lý trường hợp bị rụng ký tự (độ dài chia 4 dư 1)
     mod = len(clean_b64) % 4
     if mod == 1:
         clean_b64 = clean_b64[:-1]
-    elif mod == 2:
+        mod = len(clean_b64) % 4
+
+    # 3. Bù dấu '=' chuẩn hóa độ dài chia hết cho 4
+    if mod == 2:
         clean_b64 += "=="
     elif mod == 3:
         clean_b64 += "="
+
     return base64.b64decode(clean_b64)
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/static/uploads/<path:filename>')
-def serve_upload(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-# 1. API CẤP THỜI GIAN ĐỒNG BỘ RTC CHO ESP32
+# =========================================================================
+# 1. API CẤP THỜI GIAN CHO ESP32 (Đồng bộ RTC & Tạo Tên File Ảnh)
+# =========================================================================
 @app.route('/api/get-time', methods=['GET'])
 def get_time():
-    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    now_str = datetime.now(VN_TZ).strftime("%Y%m%d_%H%M%S")
     return now_str, 200, {'Content-Type': 'text/plain'}
 
-# 2. API TRẢ DỮ LIỆU BẢNG ĐIỀU KHIỂN WEB
+# =========================================================================
+# 2. API LẤY DỮ LIỆU BẢNG ĐIỀU KHIỂN (Dành cho Giao diện Web Client)
+# =========================================================================
 @app.route('/api/data', methods=['GET'])
 def get_data():
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT id, timestamp, temp, hum, vib, battery, img_path FROM sensor_data ORDER BY id DESC LIMIT 50")
-        rows = c.fetchall()
-        c.execute("SELECT temp_max, hum_max, vib_max FROM thresholds WHERE id=1")
-        thresh = c.fetchone()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM sensor_data ORDER BY id DESC LIMIT 50")
+    rows = c.fetchall()
+    c.execute("SELECT temp_max, hum_max, vib_max FROM thresholds WHERE id=1")
+    thresh = c.fetchone()
+    conn.close()
+    
+    data = [{
+        'id': r[0], 'timestamp': r[1], 'temp': r[2], 
+        'hum': r[3], 'vib': r[4], 'img_path': r[5]
+    } for r in rows]
+    
+    t_temp = thresh[0] if thresh else 35.0
+    t_hum = thresh[1] if thresh else 80.0
+    t_vib = thresh[2] if thresh else 5.0
 
-        data = []
-        for r in rows:
-            raw_img = r[6] if r[6] else ""
-            filename_only = os.path.basename(raw_img) if raw_img else ""
-            
-            data.append({
-                'id': r[0], 'timestamp': r[1], 'temp': r[2], 
-                'hum': r[3], 'vib': r[4], 'battery': r[5], 'img_path': filename_only
-            })
+    response = jsonify({'records': data, 'thresholds': {'temp': t_temp, 'hum': t_hum, 'vib': t_vib}})
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
 
-        current_status = data[0] if len(data) > 0 else {'temp': 0, 'hum': 0, 'vib': 0, 'battery': 0}
-        
-        t_temp = thresh[0] if thresh else 35.0
-        t_hum = thresh[1] if thresh else 80.0
-        t_vib = thresh[2] if thresh else 5.0
-
-        response = jsonify({
-            'current': current_status,
-            'records': data, 
-            'thresholds': {'temp': t_temp, 'hum': t_hum, 'vib': t_vib}
-        })
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        return response, 200
-    except Exception as e:
-        print(f"[API DATA ERROR] {e}", flush=True)
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        if conn:
-            conn.close()
-
-# 3. API NHẬN CHUNK DỮ LIỆU & GHÉP ẢNH TỪ ESP32
+# =========================================================================
+# 3. API NHẬN CHUNK DỮ LIỆU & ẢNH TỪ ESP32 VIA SIM 4G
+# =========================================================================
 @app.route('/api/data-chunk', methods=['POST'])
 def receive_data_chunk():
-    clean_expired_chunks()
-    req_data = request.get_json(force=True, silent=True)
+    clean_expired_chunks() # Kiểm tra dọn RAM rác
+    
+    req_data = request.get_json()
     if not req_data:
         return jsonify({"status": "error", "message": "No JSON payload"}), 400
 
     try:
-        upload_id = str(req_data.get('upload_id', 'session_default'))
         chunk_idx = int(req_data.get('chunk_index', 0))
         total_chunks = int(req_data.get('total_chunks', 1))
-        chunk_b64 = req_data.get('data', '')
+    except (ValueError, TypeError):
+        return jsonify({"status": "error", "message": "Invalid chunk_index or total_chunks"}), 400
 
-        with storage_lock:
-            if upload_id not in chunks_storage:
-                chunks_storage[upload_id] = {
-                    'temp': req_data.get('temp', 0),
-                    'hum': req_data.get('hum', 0),
-                    'vib': req_data.get('vib', 0),
-                    'battery': req_data.get('battery', 0),
-                    'chunks': {},
-                    'created_at': time.time()
-                }
-                print(f"[SERVER] Mở phiên mới: {upload_id} ({total_chunks} chunks)", flush=True)
-            else:
-                if req_data.get('temp') is not None: chunks_storage[upload_id]['temp'] = req_data.get('temp')
-                if req_data.get('hum') is not None: chunks_storage[upload_id]['hum'] = req_data.get('hum')
-                if req_data.get('vib') is not None: chunks_storage[upload_id]['vib'] = req_data.get('vib')
-                if req_data.get('battery') is not None: chunks_storage[upload_id]['battery'] = req_data.get('battery')
+    chunk_b64 = req_data.get('data', '')
+    upload_id = str(req_data.get('upload_id', 'session_default'))
 
-            chunks_storage[upload_id]['chunks'][chunk_idx] = chunk_b64
-            received_count = len(chunks_storage[upload_id]['chunks'])
-            all_chunks_present = (received_count == total_chunks)
+    # ✅ SỬA LỖI 1: Chỉ tạo mới phiên nếu upload_id CHƯA TỒN TẠI trong RAM.
+    # Không tạo lại khi chunk_idx == 0 để tránh đè sạch dữ liệu nếu Chunk 0 tới sau.
+    if upload_id not in chunks_storage:
+        chunks_storage[upload_id] = {
+            'temp': req_data.get('temp', 0),
+            'hum': req_data.get('hum', 0),
+            'vib': req_data.get('vib', 0),
+            'chunks': {},
+            'created_at': time.time()
+        }
+        print(f"\n[SERVER] ===> KHỞI TẠO PHIÊN MỚI: {upload_id} (Tổng số chunk: {total_chunks}) <===")
+    else:
+        # Cập nhật thông tin cảm biến nếu gói tin mang dữ liệu thực
+        if req_data.get('temp'): chunks_storage[upload_id]['temp'] = req_data.get('temp')
+        if req_data.get('hum'): chunks_storage[upload_id]['hum'] = req_data.get('hum')
+        if req_data.get('vib'): chunks_storage[upload_id]['vib'] = req_data.get('vib')
 
-            temp_val = chunks_storage[upload_id]['temp']
-            hum_val = chunks_storage[upload_id]['hum']
-            vib_val = chunks_storage[upload_id]['vib']
-            bat_val = chunks_storage[upload_id]['battery']
+    # Lưu chunk vào RAM chính xác theo Index key
+    chunks_storage[upload_id]['chunks'][chunk_idx] = chunk_b64
+    received_count = len(chunks_storage[upload_id]['chunks'])
+    print(f"[SERVER CHUNK] Nhận đoạn {chunk_idx + 1}/{total_chunks} (Đã có {received_count}/{total_chunks}) - Phiên: {upload_id}")
 
-            if all_chunks_present:
-                sorted_keys = sorted(chunks_storage[upload_id]['chunks'].keys())
-                full_b64 = "".join([chunks_storage[upload_id]['chunks'][k] for k in sorted_keys])
-                del chunks_storage[upload_id]
+    # ✅ SỬA LỖI 2: Kiểm tra ĐỦ TẤT CẢ các index từ 0 -> total_chunks - 1
+    all_chunks_present = all(i in chunks_storage[upload_id]['chunks'] for i in range(total_chunks))
 
-        print(f"[SERVER CHUNK] {chunk_idx + 1}/{total_chunks} (Đã nhận {received_count}/{total_chunks})", flush=True)
+    if all_chunks_present:
+        print(f"[SERVER CHUNK] Đã nhận ĐỦ toàn bộ {total_chunks} đoạn! Bắt đầu ghép ảnh...")
+        
+        if upload_id and (upload_id.endswith('.jpg') or upload_id.endswith('.jpeg')):
+            img_filename = os.path.basename(upload_id)
+        else:
+            img_filename = f"IMG_{datetime.now(VN_TZ).strftime('%Y%m%d_%H%M%S')}.jpg"
+            
+        file_path = os.path.join(UPLOAD_FOLDER, img_filename)
 
-        if all_chunks_present:
-            if upload_id and (upload_id.endswith('.jpg') or upload_id.endswith('.jpeg')):
-                img_filename = os.path.basename(upload_id)
-            else:
-                img_filename = f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        try:
+            # 1. Ghép nối chính xác từ index 0 đến total_chunks - 1
+            full_b64 = "".join([chunks_storage[upload_id]['chunks'][i] for i in range(total_chunks)])
+            
+            # 2. Giải mã Base64
+            img_bytes = safe_base64_decode(full_b64)
+            
+            # 3. Ghi dữ liệu ra file JPEG
+            with open(file_path, "wb") as fh:
+                fh.write(img_bytes)
                 
-            file_path = os.path.join(UPLOAD_FOLDER, img_filename)
+            print(f"[SERVER OK] Ghép ảnh thành công: {img_filename} ({len(img_bytes)} bytes)")
+        except Exception as e:
+            print(f"[SERVER ERROR] Lỗi giải mã Base64 ghép ảnh: {e}")
+            img_filename = ""
 
-            try:
-                img_bytes = safe_base64_decode(full_b64)
-                with open(file_path, "wb") as fh:
-                    fh.write(img_bytes)
-                print(f"[SERVER OK] Ghép ảnh thành công: {img_filename} ({len(img_bytes)} bytes)", flush=True)
-            except Exception as e:
-                print(f"[SERVER ERROR] Lỗi giải mã Base64: {e}", flush=True)
-                img_filename = ""
+        # Lưu thông tin cảm biến và tên ảnh vào SQLite
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            now = datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            c.execute("INSERT INTO sensor_data (timestamp, temp, hum, vib, img_path) VALUES (?, ?, ?, ?, ?)",
+                      (now, chunks_storage[upload_id]['temp'], chunks_storage[upload_id]['hum'], chunks_storage[upload_id]['vib'], img_filename))
+            conn.commit()
+            conn.close()
+            print("[SERVER DB] Đã lưu dữ liệu & ảnh vào SQLite!")
+        except Exception as db_err:
+            print(f"[SERVER DB ERROR] Lỗi ghi DB: {db_err}")
 
-            conn = None
-            try:
-                conn = get_db_connection()
-                c = conn.cursor()
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                c.execute("INSERT INTO sensor_data (timestamp, temp, hum, vib, battery, img_path) VALUES (?, ?, ?, ?, ?, ?)",
-                          (now_str, temp_val, hum_val, vib_val, bat_val, img_filename))
-                conn.commit()
-                print("[SERVER DB] ===> ĐÃ LƯU DỮ LIỆU & ẢNH VÀO CSDL THÀNH CÔNG! <===", flush=True)
-            except Exception as db_err:
-                print(f"[SERVER DB ERROR] {db_err}", flush=True)
-            finally:
-                if conn:
-                    conn.close()
+        # Xóa phiên khỏi RAM sau khi ghép thành công
+        del chunks_storage[upload_id]
+        return jsonify({"status": "success", "image": img_filename}), 200
 
-            return jsonify({"status": "success", "image": img_filename}), 200
+    return jsonify({"status": "received", "chunk_index": chunk_idx, "received": received_count, "total": total_chunks}), 200
 
-        return jsonify({"status": "received", "chunk_index": chunk_idx, "received": received_count, "total": total_chunks}), 200
-
-    except Exception as global_err:
-        print(f"[SERVER CRITICAL ERROR] {global_err}", flush=True)
-        return jsonify({"status": "error", "message": str(global_err)}), 500
-
-# 4. API XÓA BẢN GHI VÀ CẬP NHẬT NGƯỠNG
+# =========================================================================
+# 4. API XÓA BẢN GHI & CẬP NHẬT CẤU HÌNH NGƯỠNG
+# =========================================================================
 @app.route('/api/delete/<int:record_id>', methods=['DELETE'])
 def delete_data(record_id):
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT img_path FROM sensor_data WHERE id=?", (record_id,))
-        row = c.fetchone()
-        if row and row[0]:
-            fname = os.path.basename(row[0])
-            img_p = os.path.join(UPLOAD_FOLDER, fname)
-            if os.path.exists(img_p):
-                os.remove(img_p)
-                
-        c.execute("DELETE FROM sensor_data WHERE id=?", (record_id,))
-        conn.commit()
-        return jsonify({"status": "deleted"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        if conn:
-            conn.close()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT img_path FROM sensor_data WHERE id=?", (record_id,))
+    row = c.fetchone()
+    if row and row[0]:
+        img_p = os.path.join(UPLOAD_FOLDER, row[0])
+        if os.path.exists(img_p):
+            os.remove(img_p)
+            
+    c.execute("DELETE FROM sensor_data WHERE id=?", (record_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "deleted"}), 200
 
 @app.route('/api/thresholds', methods=['POST'])
 def set_thresholds():
-    req = request.get_json(force=True, silent=True)
-    if not req:
-        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("UPDATE thresholds SET temp_max=?, hum_max=?, vib_max=? WHERE id=1",
-                  (req.get('temp'), req.get('hum'), req.get('vib')))
-        conn.commit()
-        return jsonify({"status": "updated"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        if conn:
-            conn.close()
+    req = request.get_json()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE thresholds SET temp_max=?, hum_max=?, vib_max=? WHERE id=1",
+              (req.get('temp'), req.get('hum'), req.get('vib')))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "updated"}), 200
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
