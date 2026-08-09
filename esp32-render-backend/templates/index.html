@@ -2,189 +2,98 @@
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IoT Dashboard - Giám Sát Cảm Biến & SIM7680C</title>
+    <title>Giam Sat Ciem Tra IoT - SIM7680C</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <style>
-        body { background-color: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .alert-row { background-color: #ffe6e6 !important; }
-        .img-thumb { width: 70px; height: 50px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 1px solid #ddd; transition: transform 0.2s; }
-        .img-thumb:hover { transform: scale(1.1); }
-        .card-stat { border-radius: 10px; transition: transform 0.2s, box-shadow 0.2s; }
-        .card-stat:hover { transform: translateY(-3px); box-shadow: 0 6px 15px rgba(0,0,0,0.1); }
-        .stat-val { font-size: 2rem; font-weight: 700; margin-top: 5px; }
-        .live-badge { animation: pulse 1.5s infinite; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+        .alert-row { background-color: #ffcccc !important; }
+        .img-thumb { width: 80px; height: 60px; object-fit: cover; border-radius: 4px; cursor: pointer; }
     </style>
 </head>
-<body>
+<body class="bg-light">
 <div class="container py-4">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2 class="text-primary fw-bold m-0">IoT Dashboard - Giám Sát Realtime</h2>
-        <span class="badge bg-success live-badge fs-6">● LIVE UPDATE</span>
-    </div>
+    <h2 class="mb-4 text-primary font-weight-bold">IoT Dashboard - ESP32 & SIM7680C</h2>
     
-    <!-- KHỐI HIỂN THỊ THÔNG SỐ TRỰC TUYẾN -->
-    <div class="row g-3 mb-4">
-        <div class="col-md-3">
-            <div class="card card-stat shadow-sm p-3 border-start border-danger border-4">
-                <div class="text-muted small fw-bold">🌡️ NHIỆT ĐỘ HIỆN TẠI</div>
-                <div class="stat-val text-danger" id="currTemp">-- °C</div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card card-stat shadow-sm p-3 border-start border-primary border-4">
-                <div class="text-muted small fw-bold">💧 ĐỘ ẨM HIỆN TẠI</div>
-                <div class="stat-val text-primary" id="currHum">-- %</div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card card-stat shadow-sm p-3 border-start border-warning border-4">
-                <div class="text-muted small fw-bold">📳 ĐỘ RUNG HIỆN TẠI</div>
-                <div class="stat-val text-warning" id="currVib">--</div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card card-stat shadow-sm p-3 border-start border-success border-4">
-                <div class="text-muted small fw-bold">🔋 PIN HIỆN TẠI</div>
-                <div class="stat-val text-success" id="currBat">-- V</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- KHỐI CÀI ĐẶT NGƯỠNG CẢNH BÁO -->
-    <div class="card mb-4 shadow-sm border-0">
-        <div class="card-header bg-dark text-white fw-bold">⚙️ Cài Đặt Ngưỡng Cảnh Báo</div>
+    <!-- Khối nhập Ngưỡng cảnh báo -->
+    <div class="card mb-4 shadow-sm">
+        <div class="card-header bg-dark text-white font-weight-bold">Cai Dat Nguong Canh Bao</div>
         <div class="card-body">
             <form id="threshForm" class="row g-3">
                 <div class="col-md-3">
-                    <label class="form-label small fw-bold">Nhiệt độ tối đa (°C)</label>
+                    <label class="form-label">Nhiệt độ tối đa (°C)</label>
                     <input type="number" step="0.1" class="form-control" id="tempThresh">
                 </div>
                 <div class="col-md-3">
-                    <label class="form-label small fw-bold">Độ ẩm tối đa (%)</label>
+                    <label class="form-label">Độ ẩm tối đa (%)</label>
                     <input type="number" step="0.1" class="form-control" id="humThresh">
                 </div>
                 <div class="col-md-3">
-                    <label class="form-label small fw-bold">Độ rung tối đa</label>
+                    <label class="form-label">Độ rung tối đa (m/s²)</label>
                     <input type="number" step="0.1" class="form-control" id="vibThresh">
                 </div>
                 <div class="col-md-3 d-flex align-items-end">
-                    <button type="button" onclick="saveThresholds()" class="btn btn-success w-100 fw-bold">💾 Lưu Cấu Hình</button>
+                    <button type="button" onclick="saveThresholds()" class="btn btn-success w-100">Lưu Cấu Hình</button>
                 </div>
             </form>
         </div>
     </div>
 
-    <!-- BẢNG LỊCH SỬ DỮ LIỆU -->
-    <div class="card shadow-sm border-0">
-        <div class="card-header bg-primary text-white fw-bold">📊 Lịch Sử Dữ Liệu & Hình Ảnh</div>
-        <div class="card-body p-0">
-            <div class="table-responsive">
-                <table class="table table-hover align-middle mb-0 text-center">
-                    <thead class="table-light">
-                        <tr>
-                            <th>ID</th>
-                            <th>Thời Gian</th>
-                            <th>Nhiệt Độ (°C)</th>
-                            <th>Độ Ẩm (%)</th>
-                            <th>Độ Rung</th>
-                            <th>Điện Áp Pin</th>
-                            <th>Hình Ảnh</th>
-                            <th>Thao Tác</th>
-                        </tr>
-                    </thead>
-                    <tbody id="dataTable"></tbody>
-                </table>
-            </div>
+    <!-- Bảng Dữ Liệu -->
+    <div class="card shadow-sm">
+        <div class="card-header bg-primary text-white font-weight-bold">Lịch Sử Dữ Liệu & Hình Ảnh</div>
+        <div class="card-body">
+            <table class="table table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Thời Gian</th>
+                        <th>Nhiệt Độ (°C)</th>
+                        <th>Độ Ẩm (%)</th>
+                        <th>Độ Rung (m/s²)</th>
+                        <th>Hình Ảnh</th>
+                        <th>Thao Tác</th>
+                    </tr>
+                </thead>
+                <tbody id="dataTable"></tbody>
+            </table>
         </div>
     </div>
 </div>
 
-<!-- MODAL XEM ẢNH LỚN -->
-<div class="modal fade" id="imageModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered modal-lg">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="imageModalTitle">Xem Ảnh Chi Tiết</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body text-center p-0">
-        <img id="modalImgPreview" src="" class="img-fluid rounded-bottom" style="max-height: 80vh;">
-      </div>
-    </div>
-  </div>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let currentThresh = { temp: 35, hum: 80, vib: 5 };
-const imageModal = new bootstrap.Modal(document.getElementById('imageModal'));
-
-function showImageModal(imgSrc, title) {
-    document.getElementById('modalImgPreview').src = imgSrc;
-    document.getElementById('imageModalTitle').innerText = title || 'Xem Ảnh Chi Tiết';
-    imageModal.show();
-}
-
-function formatTime(timeStr) {
-    if (!timeStr) return '--';
-    let d = new Date(timeStr.replace(' ', 'T'));
-    if (isNaN(d.getTime())) return timeStr;
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
 
 async function loadData() {
-    try {
-        const res = await fetch('/api/data');
-        const json = await res.json();
-        
-        currentThresh = json.thresholds;
-        if (document.activeElement !== document.getElementById('tempThresh')) {
-            document.getElementById('tempThresh').value = currentThresh.temp;
-            document.getElementById('humThresh').value = currentThresh.hum;
-            document.getElementById('vibThresh').value = currentThresh.vib;
-        }
+    const res = await fetch('/api/data');
+    const json = await res.json();
+    currentThresh = json.thresholds;
+    
+    document.getElementById('tempThresh').value = currentThresh.temp;
+    document.getElementById('humThresh').value = currentThresh.hum;
+    document.getElementById('vibThresh').value = currentThresh.vib;
 
-        if (json.current) {
-            document.getElementById('currTemp').innerText = (json.current.temp || 0).toFixed(1) + ' °C';
-            document.getElementById('currHum').innerText = (json.current.hum || 0).toFixed(1) + ' %';
-            document.getElementById('currVib').innerText = json.current.vib || 0;
-            document.getElementById('currBat').innerText = (json.current.battery || 0).toFixed(2) + ' V';
-        }
+    const tbody = document.getElementById('dataTable');
+    tbody.innerHTML = '';
 
-        const tbody = document.getElementById('dataTable');
-        tbody.innerHTML = '';
+    json.records.forEach(row => {
+        const isAlert = row.temp > currentThresh.temp || row.hum > currentThresh.hum || row.vib > currentThresh.vib;
+        const tr = document.createElement('tr');
+        if (isAlert) tr.classList.add('alert-row');
 
-        json.records.forEach(row => {
-            const isAlert = row.temp > currentThresh.temp || row.hum > currentThresh.hum || row.vib > currentThresh.vib;
-            const tr = document.createElement('tr');
-            if (isAlert) tr.classList.add('alert-row');
+        const imgTag = row.img_path 
+            ? `<a href="/static/uploads/${row.img_path}" target="_blank"><img src="/static/uploads/${row.img_path}" class="img-thumb"></a>` 
+            : '<span class="text-muted">Không có</span>';
 
-            // Xử lý tạo URL ảnh sạch chuẩn mực
-            let imgTag = '<span class="text-muted small">Không có</span>';
-            if (row.img_path && row.img_path.trim() !== "") {
-                const cleanFileName = row.img_path.split('/').pop();
-                const fullImgUrl = `/static/uploads/${cleanFileName}`;
-                imgTag = `<img src="${fullImgUrl}" class="img-thumb" onclick="showImageModal('${fullImgUrl}', 'Ảnh ID #${row.id} - ${formatTime(row.timestamp)}')">`;
-            }
-
-            tr.innerHTML = `
-                <td><b>${row.id}</b></td>
-                <td class="small">${formatTime(row.timestamp)}</td>
-                <td><b class="${row.temp > currentThresh.temp ? 'text-danger' : ''}">${row.temp}</b></td>
-                <td><b class="${row.hum > currentThresh.hum ? 'text-primary' : ''}">${row.hum}</b></td>
-                <td><b class="${row.vib > currentThresh.vib ? 'text-warning' : ''}">${row.vib}</b></td>
-                <td><span class="badge bg-secondary">${(row.battery || 0).toFixed(2)} V</span></td>
-                <td>${imgTag}</td>
-                <td><button class="btn btn-sm btn-outline-danger" onclick="deleteRecord(${row.id})">Xóa</button></td>
-            `;
-            tbody.appendChild(tr);
-        });
-    } catch (e) {
-        console.error("Lỗi khi tải dữ liệu:", e);
-    }
+        tr.innerHTML = `
+            <td>${row.id}</td>
+            <td>${row.timestamp}</td>
+            <td><b>${row.temp}</b></td>
+            <td><b>${row.hum}</b></td>
+            <td><b>${row.vib}</b></td>
+            <td>${imgTag}</td>
+            <td><button class="btn btn-sm btn-danger" onclick="deleteRecord(${row.id})">Xóa</button></td>
+        `;
+        tbody.appendChild(tr);
+    });
 }
 
 async function saveThresholds() {
@@ -197,12 +106,12 @@ async function saveThresholds() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ temp, hum, vib })
     });
-    alert('Đã cập nhật ngưỡng cảnh báo thành công!');
+    alert('Đã cập nhật ngưỡng cảnh báo!');
     loadData();
 }
 
 async function deleteRecord(id) {
-    if (confirm(`Bạn có chắc chắn muốn xóa bản ghi ID #${id}?`)) {
+    if (confirm('Bạn có chắc chắn muốn xóa mốc dữ liệu này?')) {
         await fetch(`/api/delete/${id}`, { method: 'DELETE' });
         loadData();
     }
